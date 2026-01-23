@@ -289,6 +289,9 @@ kfork(void)
 
   pid = np->pid;
 
+  np->syscall_mask = p->syscall_mask;
+  strncpy(np->path, p->path, strlen(p->path));
+
   release(&np->lock);
 
   acquire(&wait_lock);
