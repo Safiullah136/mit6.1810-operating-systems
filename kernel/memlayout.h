@@ -63,6 +63,7 @@
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
 #ifdef LAB_PGTBL
+#define SUPSTART (PHYSTOP - 32 * SUPERPGSIZE)
 #define USYSCALL (TRAPFRAME - PGSIZE)
 
 struct usyscall {

@@ -202,6 +202,7 @@ superpg_free()
   * (a - PGSIZE + 1) = '8';
   * (a - 2*PGSIZE + 1) = '9';
 
+
   // free last 4096 bytes of a super page
   sbrk(-PGSIZE);
   a = sbrk(0);
@@ -228,6 +229,7 @@ superpg_free()
       exit(1);
     }
   }
+
 
   pte1 = (pte_t) pgpte((void *) a);
   if(pte1 != 0) {
