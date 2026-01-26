@@ -15,6 +15,7 @@ extern char trampoline[], uservec[];
 void kernelvec();
 
 extern int devintr();
+// extern void timer_save();
 
 void
 trapinit(void)
@@ -68,6 +69,13 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+    if (which_dev == 2) {
+      if(p->next_alarm_in != -1 && --p->next_alarm_in == 0) {
+        p->next_alarm_in = -1;
+        memmove(&p->alarm_tf, p->trapframe, sizeof(struct trapframe));
+        p->trapframe->epc = (uint64) p->handler;
+      }
+    }
   } else if((r_scause() == 15 || r_scause() == 13) &&
             vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
     // page fault on lazily-allocated page
