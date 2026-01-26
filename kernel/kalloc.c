@@ -9,10 +9,20 @@
 #include "riscv.h"
 #include "defs.h"
 
+#define MAX_PAGES 32768
+
 void freerange(void *pa_start, void *pa_end);
+
+uint64 ref_count_index(uint64);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
+
+
+struct {
+  uint8 ref_count[MAX_PAGES];
+  struct spinlock ref_count_lock;
+} pages;
 
 struct run {
   struct run *next;
@@ -27,6 +37,7 @@ void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&pages.ref_count_lock, "ref_count");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -54,6 +65,13 @@ kfree(void *pa)
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
+  if (get_ref_count((uint64) pa) > 1) {
+    dec_ref_count((uint64) pa);
+    return;
+  }
+
+  set_ref_count((uint64) pa, 0);
+
   r = (struct run*)pa;
 
   acquire(&kmem.lock);
@@ -76,7 +94,51 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    set_ref_count((uint64) r, 1);
+  }
   return (void*)r;
+}
+
+uint64 ref_count_index(uint64 pa) {
+  return (pa - KERNBASE) / PGSIZE;
+}
+
+uint8 get_ref_count(uint64 pa) {
+  uint8 num = 0; uint64 idx = 0;
+
+  idx = ref_count_index(pa);
+  acquire(&pages.ref_count_lock);
+  num = pages.ref_count[idx];
+  release(&pages.ref_count_lock);
+
+  return num;
+}
+
+void set_ref_count(uint64 pa, uint8 val) {
+  uint64 idx = 0;
+
+  idx = ref_count_index(pa);
+  acquire(&pages.ref_count_lock);
+  pages.ref_count[idx] = val;
+  release(&pages.ref_count_lock);
+}
+
+void inc_ref_count(uint64 pa) {
+  uint64 idx = 0;
+
+  idx = ref_count_index(pa);
+  acquire(&pages.ref_count_lock);
+  pages.ref_count[idx]++;
+  release(&pages.ref_count_lock);
+}
+
+void dec_ref_count(uint64 pa) {
+  uint64 idx = 0;
+
+  idx = ref_count_index(pa);
+  acquire(&pages.ref_count_lock);
+  pages.ref_count[idx]--;
+  release(&pages.ref_count_lock);
 }
