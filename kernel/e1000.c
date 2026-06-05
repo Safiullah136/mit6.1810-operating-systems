@@ -105,7 +105,31 @@ e1000_transmit(char *buf, int len)
   // so that the caller knows to free buf.
   //
 
-  
+  struct tx_desc t_desc;
+  t_desc.addr = (uint64) buf;
+  t_desc.length = len;
+  t_desc.special = 0;
+  t_desc.status = 0;
+
+  t_desc.cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  t_desc.css = 0;
+  t_desc.cso = 0;
+
+  acquire(&e1000_lock);
+
+  if ( (tx_ring[regs[E1000_TDT]].status & E1000_TXD_STAT_DD) == 0) {
+    release(&e1000_lock);
+    return -1;
+  }
+
+  if ( (tx_ring[regs[E1000_TDT]].status & E1000_TXD_STAT_DD) && tx_ring[regs[E1000_TDT]].addr != 0) {
+    kfree((void *) tx_ring[regs[E1000_TDT]].addr);
+  }
+
+  tx_ring[regs[E1000_TDT]] = t_desc;
+  regs[E1000_TDT] = (regs[E1000_TDT] + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -119,6 +143,37 @@ e1000_recv(void)
   // Create and deliver a buf for each packet (using net_rx()).
   //
 
+  char * buf;
+  uint16 length;
+
+  acquire(&e1000_lock);
+
+  while(1) {
+    int arrived_index = (regs[E1000_RDT] + 1) % RX_RING_SIZE; 
+
+    if( (rx_ring[arrived_index].status & E1000_RXD_STAT_DD) == 0) {
+      release(&e1000_lock);
+      return;
+    }
+
+    buf = (char *) rx_ring[arrived_index].addr;
+    length = rx_ring[arrived_index].length;
+
+    rx_ring[arrived_index].addr = (uint64) kalloc(); 
+    if (!rx_ring[arrived_index].addr) {
+      release(&e1000_lock);
+      panic("e1000_recv");
+    }
+    rx_ring[arrived_index].status = 0;
+
+    regs[E1000_RDT] = arrived_index;
+
+    release(&e1000_lock);
+
+    net_rx(buf, length);
+
+    acquire(&e1000_lock);
+  }  
 }
 
 void

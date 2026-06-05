@@ -19,6 +19,8 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
 
+static struct bound_ports_page* bound_ports_page = 0;
+
 void
 netinit(void)
 {
@@ -37,8 +39,68 @@ sys_bind(void)
   //
   // Your code here.
   //
+  int port;
+  argint(0, &port);
 
-  return -1;
+  acquire(&netlock);
+  if (!bound_ports_page) {
+    bound_ports_page = (struct bound_ports_page *) kalloc();
+    if(!bound_ports_page) {
+      release(&netlock);
+      return -1;
+    }
+
+    bound_ports_page->next = 0;
+    memset(bound_ports_page->bitmap, 0, NUM_PORTS);
+  }
+
+  // First 8 bytes store address of next page where bound ports data is stored.
+
+  struct bound_ports_page* curr = bound_ports_page; 
+  struct bound_ports_page* prev = 0;
+  while(1) {
+    if (!curr) {
+      prev->next = (struct bound_ports_page*)kalloc();
+      curr = prev->next;
+      if(!curr) {
+        release(&netlock);
+        panic("panic: sys_bind");
+      }
+      curr->next = 0;
+      memset(curr->bitmap, 0, NUM_PORTS);
+    }
+
+    uint8* bitmap = curr->bitmap;
+    struct bound_port* bound_ports = curr->bound_ports;
+
+    for (int i = 0; i < NUM_PORTS; i++) {
+      if(bitmap[i] && bound_ports[i].port == port) {
+        release(&netlock);
+        return 0;
+      }
+    }
+
+    uint32 i = 0;
+    while(i < NUM_PORTS && bitmap[i] != 0) {
+      i++;
+    }
+
+    if (i == NUM_PORTS) {
+      prev = curr;
+      curr = curr->next;
+      continue;
+    }
+
+    bitmap[i] = 1;
+    bound_ports[i].port = port;
+    bound_ports[i].p_q.head = 0;
+    bound_ports[i].p_q.tail = 0;
+    for(int j = 0; j < MAX_QUEUED_PACKETS; j++) {
+      bound_ports[i].p_q.buf[j] = 0;
+    }
+    release(&netlock);
+    return 0;
+  }
 }
 
 //
@@ -53,7 +115,7 @@ sys_unbind(void)
   // Optional: Your code here.
   //
 
-  return 0;
+  return -1;
 }
 
 //
@@ -77,6 +139,64 @@ sys_recv(void)
   //
   // Your code here.
   //
+  int dport;
+  uint64 src;
+  uint64 sport;
+  uint64 buf;
+  int len;
+
+  argint(0, &dport);
+  argaddr(1, &src);
+  argaddr(2, &sport);
+  argaddr(3, &buf);
+  argint(4, &len);
+
+  struct proc* p = myproc();
+
+  acquire(&netlock);
+  struct bound_ports_page* curr = bound_ports_page; 
+  while(curr) {
+    uint8* bitmap = curr->bitmap;
+    struct bound_port* bound_ports = curr->bound_ports;
+
+    for (int i = 0; i < NUM_PORTS; i++) {
+      if(bitmap[i] && bound_ports[i].port == dport) {
+        struct packets_queue* p_q = &bound_ports[i].p_q;
+        while(1) {
+          if (p_q->head == p_q->tail && !p_q->buf[p_q->head]) {
+            sleep(&bound_ports[i].port, &netlock);
+          } else { 
+            struct ip * ip = (struct ip *) ((struct eth*) p_q->buf[p_q->head] + 1);
+            struct udp* udp = (struct udp*)(ip + 1);
+            char *payload = (char *) (udp + 1);
+
+            uint32 arranged_ip = ntohl(ip->ip_src);
+            uint16 arranged_sport = ntohs(udp->sport);
+            uint16 arranged_ulen = ntohs(udp->ulen);
+
+            copyout(p->pagetable, src, (char*)&arranged_ip, sizeof(int));
+            copyout(p->pagetable, sport, (char*)&arranged_sport, sizeof(short));
+
+            int payload_len = arranged_ulen - sizeof(struct udp);
+            if(payload_len < len) {
+              len = payload_len;
+            }
+
+            copyout(p->pagetable, buf, payload, len);
+            kfree(p_q->buf[p_q->head]);
+            p_q->buf[p_q->head] = 0;
+            p_q->head = (p_q->head + 1) % MAX_QUEUED_PACKETS;
+            release(&netlock);
+            return len;
+          }
+        }
+      }
+    }
+
+    curr = curr->next;
+  }
+
+  release(&netlock);
   return -1;
 }
 
@@ -188,10 +308,46 @@ ip_rx(char *buf, int len)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
 
-  //
-  // Your code here.
-  //
-  
+  // //
+  // // Your code here.
+  // //
+
+  struct ip *ip = (struct ip*) ((struct eth*)buf + 1);
+  struct udp* udp = (struct udp *) (ip + 1); 
+  uint16 port = ntohs(udp->dport);
+
+  if (ip->ip_p != IPPROTO_UDP) {
+    kfree(buf);
+    return;
+  }
+
+  acquire(&netlock);
+  struct bound_ports_page* curr = bound_ports_page; 
+  while(curr) {
+    uint8* bitmap = curr->bitmap;
+    struct bound_port* bound_ports = curr->bound_ports;
+
+    for (int i = 0; i < NUM_PORTS; i++) {
+      if(bitmap[i] && bound_ports[i].port == port) {
+        struct packets_queue* p_q = &bound_ports[i].p_q;
+        uint8 empty = p_q->head == p_q->tail && !p_q->buf[p_q->head]; 
+        if (p_q->head != p_q->tail || !p_q->buf[p_q->head]) {
+          p_q->buf[p_q->tail] = buf;
+          p_q->length[p_q->tail] = len;
+          p_q->tail = (p_q->tail + 1) % MAX_QUEUED_PACKETS; 
+        } else {
+          kfree(buf);
+        }
+        if(empty) wakeup(&bound_ports[i].port);
+        release(&netlock);
+        return;
+      }
+    }
+
+    curr = curr->next;
+  }
+  release(&netlock);
+  kfree(buf);
 }
 
 //

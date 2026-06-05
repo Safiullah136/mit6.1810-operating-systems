@@ -125,3 +125,29 @@ struct dns_data {
   uint32 ttl;
   uint16 len;
 } __attribute__((packed));
+
+#define MAX_QUEUED_PACKETS 16
+
+struct packets_queue {
+  char *buf[MAX_QUEUED_PACKETS];
+  uint32 length[MAX_QUEUED_PACKETS];
+
+  uint8 head;
+  uint8 tail;
+};
+
+struct bound_port {
+  uint16 port;
+  struct packets_queue p_q;
+};
+
+#define PGSIZE 4096
+
+#define NUM_PORTS ((PGSIZE - sizeof(struct bound_ports_page*)) / (sizeof(struct bound_port) + 1))
+
+struct bound_ports_page {
+  struct bound_ports_page* next;
+
+  uint8 bitmap[NUM_PORTS];
+  struct bound_port bound_ports[NUM_PORTS];
+};
